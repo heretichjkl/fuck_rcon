@@ -144,6 +144,83 @@ void parseArgs(char **argv) {
 
 }
 
+void setTimeout(int sock) {
+#ifdef WIN32
+  int timeo = timeout * 1000;
+  if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+        (const char*)&timeo, sizeof(timeo)) == -1)
+    death("setsockopt failed (SO_RCVTIMEO)", 0);
+#else
+  struct timeval tv;
+  tv.tv_usec = (timeout - (int)timeout) * 1000000;
+  tv.tv_sec = timeout - (timeout - (int) timeout);
+  if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == -1)
+    death("setsockopt failed (SO_RCVTIMEO)", 0);
+#endif
+}
+
+void configureSocket(int sock) {
+  setTimeout(sock);
+}
+
+bool getTimeoutError(void) {
+  int err;
+#ifdef WIN32
+  err = WSAGetLastError();
+  if (err == WSAETIMEDOUT)
+    return true;
+#else
+  err = errno;
+  if (err == EWOULDBLOCK)
+    return true;
+#endif
+  return false;
+}
+
+size_t sendMessage(int sock, struct sockaddr_in *server) {
+  char *msg = (char*)malloc(sizeof(char) * BUFLEN);
+  f_strcpy(msg, "\xff\xff\xff\xffrcon \0");
+  f_strcat(msg, password);
+  f_strcat(msg, cmd);
+
+  size_t sent = sendto(sock, msg, f_strlen(msg) + 1, 0,
+      (const struct sockaddr*)server, sizeof(*server));
+  if (sent < 0)
+    death("Send failed", 0);
+  free(msg);
+  return sent;
+}
+
+void recieveMessage(int sock) {
+  char recv_buf[BUFLEN];
+  int recv_n;
+  do {
+    recv_n = recv(sock, recv_buf, BUFLEN, 0);
+    if (recv_n > 0) {
+      int i = 0;
+  
+      for (;i < recv_n;++i) {
+        if (recv_buf[i] == '\n') {
+          ++i;
+          break;
+        }
+      }
+  
+      for (;i < recv_n;++i)
+        putc(recv_buf[i], stdout);
+    }
+    else if (recv_n == 0)
+      printf("Connection closed\n");
+    else {
+      if (getTimeoutError() == true) {// Timeout
+        break;
+      }
+      else
+        printf("recv failed\n");
+    }
+  } while (recv_n > 0);
+}
+
 int main(int argc, char **argv) {
   parseArgs(argv);
 
@@ -166,50 +243,10 @@ int main(int argc, char **argv) {
   server.sin_addr.s_addr = inet_addr(ip);
   server.sin_port = htons(port);
 
-  // Set timeout for recv
-  struct timeval tv;
-  tv.tv_usec = (timeout - (int)timeout) * 1000000;
-  tv.tv_sec = timeout - (timeout - (int)timeout);
-  if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == -1)
-    death("setsockopt failed (SO_RCVTIMEO)", 0);
-
-  char *msg = (char*)malloc(sizeof(char) * BUFLEN);
-  f_strcpy(msg, "\xff\xff\xff\xffrcon \0");
-  f_strcat(msg, password);
-  f_strcat(msg, cmd);
-
-  size_t sent = sendto(sock, msg, f_strlen(msg) + 1, 0,
-      (const struct sockaddr*)&server, sizeof(server));
-  if (sent < 0)
-    death("Send failed", 0);
-
-  char recv_buf[BUFLEN];
-  int recv_n;
-  do {
-    recv_n = recv(sock, recv_buf, BUFLEN, 0);
-    if (recv_n > 0) {
-      int i = 0;
+  configureSocket(sock); // Set timeout for recv
   
-      for (;i < recv_n;++i) {
-        if (recv_buf[i] == '\n') {
-          ++i;
-          break;
-        }
-      }
-  
-      for (;i < recv_n;++i)
-        putc(recv_buf[i], stdout);
-    }
-    else if (recv_n == 0)
-      printf("Connection closed\n");
-    else {
-      int err = errno;
-      if (err == EWOULDBLOCK) // Timeout
-        break;
-      else
-        printf("recv failed\nCode: %d\n", err);
-    }
-  } while (recv_n > 0);
+  sendMessage(sock, &server);
+  recieveMessage(sock);
 
   closeSocket(sock);
 
