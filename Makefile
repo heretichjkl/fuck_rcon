@@ -1,5 +1,5 @@
 SRC=main.c
-CFLAGS=-O0 -Wno-stringop-overflow
+CFLAGS=-O2 -Wno-stringop-overflow
 LFLAGS=
 PROGRAM=rcon-cli
 
