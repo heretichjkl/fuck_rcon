@@ -1,6 +1,6 @@
 SRC=main.c
 CFLAGS=-O2 -Wno-stringop-overflow
-LFLAGS=
+LFLAGS=-lm
 PROGRAM=rcon-cli
 
 ifeq ($(OS), Windows_NT)
