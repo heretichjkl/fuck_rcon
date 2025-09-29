@@ -8,6 +8,7 @@
   #include <netdb.h>
 #endif
 
+#include <math.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -15,9 +16,10 @@
 #include <errno.h>
 #include <stdio.h>
 
-#define BUFLEN 1024
+static int BUFLEN = 1024;
+
 #define MSG_HELP "rcon-cli [-H HOST] [-P PORT] [-s (Use as shell)] -p PASSWORD\n" \
-                            "\t[-D (Debug)] [-t TIMEOUT_IN_SECONDS]\0"
+                            "\t[-D (Debug)] [-T TIMEOUT_IN_SECONDS] [-t (Use tcp)]\0"
 #define MSG_ERR "[!]"
 #define MSG_LOG "[*]"
 
@@ -26,16 +28,27 @@
 #define DEFAULT_HOST "127.0.0.1"
 #define DEFAULT_PORT 27015
 
+#define TCP_AUTHENTICATE 3
+#define TCP_EXEC 2
+#define TCP_RESPONSE 0
+
+#define RCON_ID 0xCAC1
+
+typedef unsigned char byte;
+
 char host[] = "127.0.0.1";
 char port[] = "27015";
-char password[BUFLEN];
+char *password;
 bool password_set = false;
 float timeout = 10.0;
+bool tcp = false;
 bool shell = false;
 bool debug = false;
 
-char cmd[BUFLEN];
-int cmd_i = 0;
+byte *data;
+int data_i = 0;
+
+bool rcon_auth(int sd);
 
 int f_strcpy(char *to, char *from) {
   int i = 0;
@@ -52,20 +65,37 @@ int f_strlen(char *s) {
   return s - t;
 }
 
-int f_strcat(char *to, char *from) {
-  int i = f_strlen(to);
-  int catted = 0;
-  for (int j = 0;from[j];++j, ++i) {
-    to[i] = from[j];
+size_t f_strncat(char *to, char *from, int n) {
+  int l = f_strlen(to);
+  size_t catted = 0;
+  for (int i = 0;from[i] && i < n;++i, ++l) {
+    to[l] = from[i];
     ++catted;
   }
-  to[i] = '\0';
+  to[l] = '\0';
+
   return catted;
 }
 
 void print_help(void) {
   puts(MSG_HELP);
   exit(1);
+}
+
+int le_bytes_to_int(byte *s, int n, int offset) {
+  int sum = 0;
+  for (int i = 3, j = 3;i >= 0;--i, --j) {
+    sum += s[i + offset] * (j > 0 ? (int) pow(256, j) : 1);
+  }
+
+  return sum;
+}
+
+void write_le_int_to_bytes(byte *s, int x, int offset) {
+  for (int i = 3, j = 3;i >= 0;--i, --j) {
+    s[i + offset] = (x >> j*8) & 0xff;
+  }
+  s[4 + offset] = '\0';
 }
 
 void death(char *s, int code) {
@@ -102,8 +132,8 @@ int init_socket(void) {
 
   memset(&hints, 0, sizeof(hints));
   hints.ai_family = AF_UNSPEC;
-  hints.ai_socktype = SOCK_DGRAM;
-  hints.ai_protocol = IPPROTO_UDP;
+  hints.ai_socktype = (tcp ? SOCK_STREAM : SOCK_DGRAM);
+  hints.ai_protocol = (tcp ? IPPROTO_TCP : IPPROTO_UDP);
 
   if ((s = getaddrinfo(host, port, &hints, &result)) != 0)
     death("getaddrinfo failed", 0);
@@ -116,9 +146,9 @@ int init_socket(void) {
             sizeof(hostnum), NULL, 0, NI_NUMERICHOST)) != 0) {
       death("getnameinfo failed", 0);
     }
-
     if ((sock =
           socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol)) < 0) {
+
       if ((rp->ai_family == AF_INET6) && (errno = EAFNOSUPPORT))
         printf(MSG_LOG" socket: No IPv6 support on this host\n");
       else
@@ -172,6 +202,9 @@ void parse_args(char **argv) {
               print_help();
             break;
           case 't':
+            tcp = true;
+            break;
+          case 'T':
             if (*(++argv)) {
               timeout = atof(*argv);
             }
@@ -187,12 +220,12 @@ void parse_args(char **argv) {
         }
         break;
       default:
-        if (cmd_i < BUFLEN) {
-          cmd[cmd_i++] = ' ';
+        if (data_i < BUFLEN) {
+          data[data_i++] = ' ';
           for (int i = 0;(*argv)[i];++i) {
-            cmd[cmd_i++] = (*argv)[i];
+            data[data_i++] = (*argv)[i];
           }
-          cmd[cmd_i] = '\0';
+          data[data_i] = '\0';
         }
         break;
     }
@@ -232,93 +265,190 @@ bool get_timeout_error(void) {
   return false;
 }
 
-size_t send_message(int sock) {
-  char *msg = (char*)malloc(sizeof(char) * BUFLEN);
-  f_strcpy(msg, "\xff\xff\xff\xffrcon \0");
-  f_strcat(msg, password);
-  f_strcat(msg, cmd);
+byte *pkg_build(int32_t cmd, char *data_str) {
+  byte *pkg = (byte*) malloc(sizeof(byte) * BUFLEN);
 
-  size_t sent = send(sock, msg, f_strlen(msg) + 1, 0);
+  if (tcp) {
+    int len = f_strlen(data_str);
+    write_le_int_to_bytes(pkg, 10 + len, 0);
+    write_le_int_to_bytes(pkg, RCON_ID, 4);
+    write_le_int_to_bytes(pkg, cmd, 8);
+    f_strncat(pkg + 12, data_str, len);
+  } else {
+    f_strcpy(pkg, "\xff\xff\xff\xffrcon \0");
+    f_strncat(pkg, password, f_strlen(password));
+    f_strncat(pkg, data_str, f_strlen(data_str));
+  }
+
+  return pkg;
+}
+
+int pkg_send(int sock, byte *pkg) {
+  //byte *pkg = pkg_build(0);
+
+  int sent = send(sock, (char*) pkg, 
+      (tcp == true ? le_bytes_to_int(pkg, 4, 0) + 4 : f_strlen(pkg) + 1),
+      0);
   if (sent < 0)
     death("Send failed", 0);
-  free(msg);
+  free(pkg); // Won't be used anymore
   return sent;
 }
 
-void recv_message(int sock) {
-  char recv_buf[BUFLEN];
-  int recv_n = 0;
-  do {
-    if (recv_n == 10) // No more to receive
+void pkg_print(char *pkg) {
+  int i;
+
+  /*for(i = 0;pkg[i];++i) {
+    if (pkg[i] == '\n') {
+      ++i;
       break;
+    }
+  }*/
 
-    recv_n = recv(sock, recv_buf, BUFLEN, 0);
-    recv_buf[recv_n] = '\0';
+  if (tcp) {
+    int pkg_size = le_bytes_to_int(pkg, 4, 0);
+    if (pkg_size == 10)
+      return;
+    pkg_size += 4;
+    for (int i = 12;i < pkg_size;++i)
+      putchar(pkg[i]);
+    if (pkg[i-1] != '\n')
+      putchar('\n');
+  } else {
+    for(i = 10;pkg[i];++i) {
+      if (pkg[i] == '\n') i += 10;
+      putchar(pkg[i]);
+    }
+  }
+}
 
-    if (recv_n > 0) {
-      int i = 0;
-  
-      for (;i < recv_n;++i) {
-        if (recv_buf[i] == '\n') {
-          ++i;
-          break;
+byte *pkg_recv(int sock) {
+  byte *pkg = (byte*) malloc(BUFLEN);
+
+  int total = 0;
+  int recv_n = 0;
+  int32_t pkg_size;
+  do {
+    if (tcp) {
+      recv_n = recv(sock, (char*) &pkg_size, 4, 0);
+      total += recv_n;
+
+      if (recv_n == 0) {
+        printf("Connection lost\n");
+        return NULL;
+      } else if (recv_n != 4) {
+        printf("recv: Invalid packet size!\n");
+        return NULL;
+      } else if (pkg_size < 10 || pkg_size > BUFLEN) {
+        printf("Invalid size of received packet!\n");
+        return NULL;
+      }
+
+      write_le_int_to_bytes(pkg, pkg_size, 0);
+
+      while (pkg_size + 4 > total) {
+        recv_n = recv(sock, (char*) pkg + total, BUFLEN - total, 0);
+        total += recv_n;
+        if (recv_n == 0) {
+          printf("Connection lost\n");
+          return NULL;
         }
       }
-  
-      for (;i < recv_n;++i)
-        putc(recv_buf[i], stdout);
-    }
-    else if (recv_n == 0)
-      printf("Connection closed\n");
-    else {
-      if (get_timeout_error() == true) {// Timeout
+      return pkg;
+    } else {
+      if (recv_n == 10) { // No more to receive
+        //pkg_print(pkg);
         break;
       }
-      else
-        printf("recv failed\n");
+
+      recv_n = recv(sock, (char*) pkg + total, BUFLEN - total, 0);
+      total += recv_n;
+      pkg[total] = '\0';
+
+      if (recv_n > 0) continue;//pkg_print(pkg);
+      else if (recv_n == 0)
+        printf("Connection closed\n");
+      else {
+        if (get_timeout_error() == true) {// Timeout
+          printf("Timeout! (%f)\n", timeout);
+          break;
+        }
+        else
+          printf("recv failed\n");
+      }
     }
   } while (recv_n > 0);
+
+  return pkg;
 }
 
 int get_line(char *buffer, int bufsize) {
   int c, len = 0;
 
-  cmd[len++] = ' ';
+  data[len++] = ' ';
   while ((c = getchar()) != '\n' && len < bufsize) {
-    cmd[len++] = c;
+    data[len++] = c;
   }
-  cmd[len] = '\0';
+  data[len] = '\0';
 
   return len;
 }
 
 void run_shell(int sock) {
+  if (tcp) {
+    if (rcon_auth(sock) == false)
+      death("Failed to authenticate!", 0);
+  }
   int len = 0;
+  byte *pkg;
   for (;;) {
     putchar('>');
     putchar(' ');
-    len = get_line(cmd, BUFLEN);
+    len = get_line(data, BUFLEN);
 
     if (len > 0) {
-      send_message(sock);
-      recv_message(sock);
+      pkg = pkg_build(TCP_EXEC, data + (tcp ? 1 : 0));
+      pkg_send(sock, pkg);
+      pkg = pkg_recv(sock);
+      pkg_print(pkg);
     }
   }
 }
 
+bool rcon_auth(int sd) {
+  int ret;
+  byte *pkg = pkg_build(TCP_AUTHENTICATE, password);
+  if (pkg == NULL)
+    death("Failed to create packet\n", 0);
+
+  ret = pkg_send(sd, pkg);
+  if (!ret)
+    return false;
+
+  pkg = pkg_recv(sd);
+  if (pkg == NULL)
+    return false;
+  int id = le_bytes_to_int(pkg, 4, 4);
+  return id == -1 ? false : true;
+}
+
 int main(int argc, char **argv) {
+  password = (char*) malloc(BUFLEN);
+  data = (char*) malloc(BUFLEN);
   parse_args(argv);
+
+  if (tcp)
+    BUFLEN = 4096;
 
   if (!password_set)
     print_help();
 
   if (debug) {
-    //printf("IP: %s\nPort: %u\nPassword: %s\n", host, port, password);
-    printf("CMD:%s\n", cmd);
+    printf("IP: %s\nPort: %s\nPassword: %s\n", host, port, password);
+    printf("DATA:%s\nBUFLEN: %d\n", data, BUFLEN);
   }
 
   int sock = init_socket();
-
   if (sock == -1)
     death("Failed to create socket", sock);
 
@@ -327,8 +457,14 @@ int main(int argc, char **argv) {
   if (shell == true) {
     run_shell(sock);
   } else {
-    send_message(sock);
-    recv_message(sock);
+    byte *pkg = pkg_build(TCP_EXEC, data + (tcp ? 1 : 0)); // Doesn't matter if tcp isn't used
+    if (tcp) {
+      if (rcon_auth(sock) == false)
+        return 1;
+    }
+    pkg_send(sock, pkg);
+    pkg = pkg_recv(sock);
+    pkg_print(pkg);
   }
 
   close_socket(sock);
