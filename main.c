@@ -3,6 +3,8 @@
   #include <winsock2.h>
   #include <windows.h>
 #else
+  #define _DEFAULT_SOURCE
+
   #include <arpa/inet.h>
   #include <sys/socket.h>
   #include <netdb.h>
@@ -221,7 +223,8 @@ void parse_args(char **argv) {
         break;
       default:
         if (data_i < BUFLEN) {
-          data[data_i++] = ' ';
+          if (data_i > 0)
+            data[data_i++] = ' ';
           for (int i = 0;(*argv)[i];++i) {
             data[data_i++] = (*argv)[i];
           }
@@ -230,6 +233,8 @@ void parse_args(char **argv) {
         break;
     }
   }
+  if (data_i == 0)
+    data[0] = '\0';
 }
 
 void set_timeout(int sock) {
@@ -274,18 +279,22 @@ byte *pkg_build(int32_t cmd, char *data_str) {
     write_le_int_to_bytes(pkg, RCON_ID, 4);
     write_le_int_to_bytes(pkg, cmd, 8);
     f_strncat(pkg + 12, data_str, len);
+    f_strncat(pkg + 12, "\0", 1);
   } else {
     f_strcpy(pkg, "\xff\xff\xff\xffrcon \0");
     f_strncat(pkg, password, f_strlen(password));
+    f_strncat(pkg, " ", 1);
     f_strncat(pkg, data_str, f_strlen(data_str));
+    f_strncat(pkg, "\0", 1);
   }
 
   return pkg;
 }
 
 int pkg_send(int sock, byte *pkg) {
-  //byte *pkg = pkg_build(0);
-
+  if (tcp) {
+    if (le_bytes_to_int(pkg, 4, 0) == 10) return 0;
+  }
   int sent = send(sock, (char*) pkg, 
       (tcp == true ? le_bytes_to_int(pkg, 4, 0) + 4 : f_strlen(pkg) + 1),
       0);
@@ -385,7 +394,6 @@ byte *pkg_recv(int sock) {
 int get_line(char *buffer, int bufsize) {
   int c, len = 0;
 
-  data[len++] = ' ';
   while ((c = getchar()) != '\n' && len < bufsize) {
     data[len++] = c;
   }
@@ -400,6 +408,7 @@ void run_shell(int sock) {
       death("Failed to authenticate!", 0);
   }
   int len = 0;
+  int sent;
   byte *pkg;
   for (;;) {
     putchar('>');
@@ -407,8 +416,9 @@ void run_shell(int sock) {
     len = get_line(data, BUFLEN);
 
     if (len > 0) {
-      pkg = pkg_build(TCP_EXEC, data + (tcp ? 1 : 0));
-      pkg_send(sock, pkg);
+      pkg = pkg_build(TCP_EXEC, data);
+      sent = pkg_send(sock, pkg);
+      if (sent == 0) continue;
       pkg = pkg_recv(sock);
       pkg_print(pkg);
     }
@@ -454,15 +464,18 @@ int main(int argc, char **argv) {
 
   configure_socket(sock); // Set timeout for recv
   
+  int sent;
+
   if (shell == true) {
     run_shell(sock);
   } else {
-    byte *pkg = pkg_build(TCP_EXEC, data + (tcp ? 1 : 0)); // Doesn't matter if tcp isn't used
+    byte *pkg = pkg_build(TCP_EXEC, data); // Doesn't matter if tcp isn't used
     if (tcp) {
       if (rcon_auth(sock) == false)
         return 1;
     }
-    pkg_send(sock, pkg);
+    sent = pkg_send(sock, pkg);
+    if (sent == 0) return 0;
     pkg = pkg_recv(sock);
     pkg_print(pkg);
   }
