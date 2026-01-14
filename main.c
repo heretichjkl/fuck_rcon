@@ -20,7 +20,7 @@
 
 static int BUFLEN = 1024;
 
-#define MSG_HELP "rcon-cli [-H HOST] [-P PORT] [-s (Use as shell)] -p PASSWORD\n" \
+#define MSG_HELP "heresy-rcon [-H HOST] [-P PORT] [-s (Use as shell)] -p PASSWORD\n" \
                             "\t[-D (Debug)] [-T TIMEOUT_IN_SECONDS] [-t (Use tcp)]\0"
 #define MSG_ERR "[!]"
 #define MSG_LOG "[*]"
@@ -179,7 +179,7 @@ void parse_args(char **argv) {
     switch (**argv) {
       case ARG_PREFIX:
         switch (*(++(*argv))) {
-          case 'I': case 'H': // Keep compatible with first version
+          case 'I': case 'H': // Keep compatible with first commit
             if (*(++argv)) {
               f_strcpy(host, *argv);
             }

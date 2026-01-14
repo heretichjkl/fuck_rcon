@@ -1,7 +1,7 @@
 SRC=main.c
 CFLAGS=-O2 -Wno-stringop-overflow -std=c99
 LFLAGS=-lm
-PROGRAM=rcon-cli
+PROGRAM=heresy-rcon
 
 ifeq ($(OS), Windows_NT)
 	LFLAGS += -lws2_32
